@@ -8,9 +8,31 @@ class ServerException(Exception):
     pass
 
 #----------------------------------------------------------------------
-# Case handlers: each one knows ONE situation.
 
-class case_no_file(object):
+class base_case(object):
+    '''Parent for case handlers. Holds helpers shared by 2+ cases.'''
+
+    def handle_file(self, handler, full_path):
+        try:
+            with open(full_path, 'rb') as reader:
+                content = reader.read()
+            handler.send_content(content)
+        except IOError as msg:
+            msg = "'{0}' cannot be read: {1}".format(full_path, msg)
+            handler.handle_error(msg)
+
+    def index_path(self, handler):
+        return os.path.join(handler.full_path, 'index.html')
+
+    def test(self, handler):
+        assert False, 'Not implemented.'
+
+    def act(self, handler):
+        assert False, 'Not implemented.'
+
+#----------------------------------------------------------------------
+
+class case_no_file(base_case):
     '''File or directory does not exist.'''
 
     def test(self, handler):
@@ -20,56 +42,80 @@ class case_no_file(object):
         raise ServerException("'{0}' not found".format(handler.path))
 
 
-class case_cgi_file(object):
+class case_cgi_file(base_case):
     '''Something runnable.'''
+
+    def run_cgi(self, handler, full_path):
+        result = subprocess.run([sys.executable, full_path],
+                                capture_output=True)
+        if result.returncode != 0:
+            msg = result.stderr.decode("utf-8", errors="replace")
+            handler.handle_error("Script failed: " + msg)
+        else:
+            handler.send_content(result.stdout)
 
     def test(self, handler):
         return os.path.isfile(handler.full_path) and \
                handler.full_path.endswith('.py')
 
     def act(self, handler):
-        handler.run_cgi(handler.full_path)
+        self.run_cgi(handler, handler.full_path)
 
 
-class case_existing_file(object):
+class case_existing_file(base_case):
     '''File exists.'''
 
     def test(self, handler):
         return os.path.isfile(handler.full_path)
 
     def act(self, handler):
-        handler.handle_file(handler.full_path)
+        self.handle_file(handler, handler.full_path)
 
 
-class case_directory_index_file(object):
+class case_directory_index_file(base_case):
     '''Serve index.html page for a directory.'''
-
-    def index_path(self, handler):
-        return os.path.join(handler.full_path, 'index.html')
 
     def test(self, handler):
         return os.path.isdir(handler.full_path) and \
                os.path.isfile(self.index_path(handler))
 
     def act(self, handler):
-        handler.handle_file(self.index_path(handler))
+        self.handle_file(handler, self.index_path(handler))
 
 
-class case_directory_no_index_file(object):
+class case_directory_no_index_file(base_case):
     '''Serve listing for a directory without an index.html page.'''
 
-    def index_path(self, handler):
-        return os.path.join(handler.full_path, 'index.html')
+    Listing_Page = '''\
+<html>
+<body>
+<ul>
+{0}
+</ul>
+</body>
+</html>
+'''
+
+    def list_dir(self, handler, full_path):
+        try:
+            entries = os.listdir(full_path)
+            bullets = ['<li>{0}</li>'.format(e)
+                       for e in entries if not e.startswith('.')]
+            page = self.Listing_Page.format('\n'.join(bullets))
+            handler.send_content(page.encode("utf-8"))
+        except OSError as msg:
+            msg = "'{0}' cannot be listed: {1}".format(handler.path, msg)
+            handler.handle_error(msg)
 
     def test(self, handler):
         return os.path.isdir(handler.full_path) and \
                not os.path.isfile(self.index_path(handler))
 
     def act(self, handler):
-        handler.list_dir(handler.full_path)
+        self.list_dir(handler, handler.full_path)
 
 
-class case_always_fail(object):
+class case_always_fail(base_case):
     '''Base case if nothing else worked.'''
 
     def test(self, handler):
@@ -81,10 +127,12 @@ class case_always_fail(object):
 #----------------------------------------------------------------------
 
 class RequestHandler(BaseHTTPRequestHandler):
+    '''
+    Classify the request and let the first matching case handle it.
+    If anything goes wrong, an error page is constructed.
+    '''
 
     # Order matters: the first case whose test() passes wins.
-    # case_cgi_file must come BEFORE case_existing_file,
-    # or .py files would just be sent as text.
     Cases = [case_no_file(),
              case_cgi_file(),
              case_existing_file(),
@@ -101,16 +149,6 @@ class RequestHandler(BaseHTTPRequestHandler):
 </html>
 """
 
-    Listing_Page = '''\
-<html>
-<body>
-<ul>
-{0}
-</ul>
-</body>
-</html>
-'''
-
     def do_GET(self):
         try:
             self.full_path = os.getcwd() + self.path
@@ -123,36 +161,6 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception as msg:
             self.handle_error(msg)
 
-    def handle_file(self, full_path):
-        try:
-            with open(full_path, 'rb') as reader:
-                content = reader.read()
-            self.send_content(content)
-        except IOError as msg:
-            msg = "'{0}' cannot be read: {1}".format(self.path, msg)
-            self.handle_error(msg)
-
-    def list_dir(self, full_path):
-        try:
-            entries = os.listdir(full_path)
-            bullets = ['<li>{0}</li>'.format(e)
-                       for e in entries if not e.startswith('.')]
-            page = self.Listing_Page.format('\n'.join(bullets))
-            self.send_content(page.encode("utf-8"))
-        except OSError as msg:
-            msg = "'{0}' cannot be listed: {1}".format(self.path, msg)
-            self.handle_error(msg)
-
-    def run_cgi(self, full_path):
-        # Run the script in a subprocess and capture what it prints.
-        result = subprocess.run([sys.executable, full_path],
-                                capture_output=True)
-        if result.returncode != 0:
-            msg = result.stderr.decode("utf-8", errors="replace")
-            self.handle_error("Script failed: " + msg)
-        else:
-            self.send_content(result.stdout)
-
     def handle_error(self, msg):
         content = self.Error_Page.format(path=self.path, msg=msg)
         self.send_content(content.encode("utf-8"), 404)
@@ -163,6 +171,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
+
+#----------------------------------------------------------------------
 
 if __name__ == '__main__':
     print("Serving files from:", os.getcwd())
