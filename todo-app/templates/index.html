@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>My To-Do List</title>
+  <style>
+    body { font-family: sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+    ul { list-style: none; padding: 0; }
+    li { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+    form { display: inline; }
+    .done { text-decoration: line-through; color: gray; }
+  </style>
+</head>
+<body>
+  <h1>My To-Do List</h1>
+
+  <form action="/add" method="post">
+    <input name="text" placeholder="What needs doing?" required autofocus>
+    <button>Add</button>
+  </form>
+
+  <ul>
+    {% for todo in todos %}
+    <li>
+      <form action="{{ url_for('toggle', todo_id=todo.id) }}" method="post">
+        <button>{{ "↩" if todo.done else "✓" }}</button>
+      </form>
+      <span class="{{ 'done' if todo.done else '' }}">{{ todo.text }}</span>
+      <form action="{{ url_for('delete', todo_id=todo.id) }}" method="post">
+        <button>✕</button>
+      </form>
+    </li>
+    {% else %}
+    <li>Nothing yet. Add your first task!</li>
+    {% endfor %}
+  </ul>
+</body>
+</html>
