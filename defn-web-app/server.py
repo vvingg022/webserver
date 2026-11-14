@@ -1,19 +1,19 @@
-from request import Request
 import mimetypes
 import os
 import socket
-import typing
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+from request import Request
 
 HOST = "127.0.0.1"
 PORT = 9000
 
-# Serve files from the "www" folder next to this script,
-# no matter which folder you start the server from.
+# Refuse request bodies bigger than this (5 MiB).
+MAX_BODY = 5 * 1024 * 1024
+
 SERVER_ROOT = (Path(__file__).parent / "www").resolve()
 
-# Windows can have wrong file types in its registry, so set the important ones.
 mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("text/javascript", ".js")
 
@@ -39,6 +39,13 @@ Content-length: 18
 
 Method Not Allowed""".replace(b"\n", b"\r\n")
 
+PAYLOAD_TOO_LARGE_RESPONSE = b"""\
+HTTP/1.1 413 Payload Too Large
+Content-type: text/plain
+Content-length: 17
+
+Payload Too Large""".replace(b"\n", b"\r\n")
+
 FILE_RESPONSE_TEMPLATE = """\
 HTTP/1.1 200 OK
 Content-type: {content_type}
@@ -51,7 +58,6 @@ def serve_file(sock: socket.socket, path: str) -> None:
     """Send the file at `path` (relative to SERVER_ROOT) to the socket,
     or a 404 if it doesn't exist or lives outside SERVER_ROOT.
     """
-    # Drop any ?query part and decode %20-style escapes.
     path = unquote(urlsplit(path).path)
     if path == "/":
         path = "/index.html"
@@ -62,7 +68,6 @@ def serve_file(sock: socket.socket, path: str) -> None:
         sock.sendall(NOT_FOUND_RESPONSE)
         return
 
-    # Refuse anything outside www, and anything that isn't a plain file.
     if not abspath.is_relative_to(SERVER_ROOT) or not abspath.is_file():
         sock.sendall(NOT_FOUND_RESPONSE)
         return
@@ -99,15 +104,35 @@ with socket.socket() as server_sock:
         print(f"Received connection from {client_addr}...")
         try:
             with client_sock:
+                # Don't wait forever for a client that goes quiet.
+                client_sock.settimeout(10)
                 try:
                     request = Request.from_socket(client_sock)
                     print(request.method, request.path)
-                    print("x-tag values:", request.headers.get_all("x-tag"), "| last:", request.headers.get("x-tag"))
+
+                    try:
+                        content_length = max(int(request.headers.get("content-length", "0")), 0)
+                    except ValueError:
+                        content_length = 0
+
+                    # Refuse oversized bodies BEFORE inviting the client to send them.
+                    if content_length > MAX_BODY:
+                        client_sock.sendall(PAYLOAD_TOO_LARGE_RESPONSE)
+                        continue
+
+                    if "100-continue" in request.headers.get("expect", "").lower():
+                        print("Sending 100 Continue")
+                        client_sock.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+
+                    if content_length:
+                        body = request.body.read(content_length)
+                        print(f"Request body: {len(body)} bytes, starts with {body[:60]!r}")
 
                     if request.method != "GET":
                         client_sock.sendall(METHOD_NOT_ALLOWED_RESPONSE)
-                    else:
-                        serve_file(client_sock, request.path)
+                        continue
+
+                    serve_file(client_sock, request.path)
                 except ValueError as e:
                     print(f"Failed to parse request: {e}")
                     client_sock.sendall(BAD_REQUEST_RESPONSE)
